@@ -27,11 +27,25 @@ See [`PLAN.md`](PLAN.md) for the full design, repo layout, milestones, and open 
 
 | File | Role |
 |------|------|
-| `onnx_ops.py` | minimal ONNX graph builders (Gather / Conv / Slice / Pad / Tile / Transpose …) |
-| `solvers.py`  | detector→builder cascade; `solve_task(train)` → `(model, method)` over 13 templates |
-| `surgery.py`  | behavior-preserving golf passes (prune, dedup, identity, int32 narrow, conv1x1→Gather) |
+| `onnx_ops.py` | minimal **content-aware** ONNX graph builders (Gather / Conv / Slice / Transpose …) |
+| `solvers.py`  | detector→builder cascade; `solve_task(train)` → `(model, method)` |
+| `surgery.py`  | behavior-preserving golf passes (prune, dedup, identity, conv1x1→Gather) |
+| `scorer.py`   | **official** scoring + correctness, wrapping `Dataset/neurogolf_utils.py` |
+| `analyze.py`  | diagnostic: classify each task's transform on content grids; coverage ceiling |
 | `selftest.py` | synthetic validation of the cascade + surgery (no data needed) |
-| `run.py`      | end-to-end: solve all 400 → golf → `submission.zip` (needs data) |
+| `run.py`      | end-to-end over the real 400 tasks → `submission.zip` + `ledger.csv` |
+
+### Current baseline (official scorer, gate = train+test+arc-gen)
+**11/400 solved, 208.53 points** — 2 color-permute, 2 conv1x1 color-map, 2 transpose,
+2 rot180, 2 upscale, 1 rot90. (Up from 4/95 once the scorer/correctness were fixed.)
+
+### Why only 11 — the coverage ceiling
+`analyze.py` shows **only 17/400 tasks are whole-grid transforms**; the other 383 need
+object-level reasoning / composition (the real ARC difficulty). Of those 17, the ones with
+**variable grid sizes** (flips, tile) or **variable factors** (some upscales) are unsolvable
+by a *fixed* graph — there are no dynamic ops (`NonZero`/`Loop` are banned) to discover the
+size at runtime. ~11 are size-agnostic or size-constant, hence solvable. **Real progress past
+this requires Tier-B DSL synthesis with unrolled neighborhood/object ops** (see `PLAN.md`).
 
 ```bash
 python3.12 -m venv .venv && ./.venv/bin/pip install numpy onnx onnxruntime kaggle

@@ -59,32 +59,43 @@ def m_gather2(row_idx, col_idx):
     )
 
 
-def m_flip_h():
-    """Horizontal flip = single Slice reversing axis 3 (steps=-1). One node to
-    `output`, no intermediate, only ~4 tiny index params."""
-    return mk(
-        [helper.make_node("Slice", ["input", "st", "en", "ax", "sp"], ["output"])],
-        [_int64([GW - 1], "st"), _int64([-GW - 1], "en"), _int64([3], "ax"), _int64([-1], "sp")],
-    )
+# --- content-aware builders: operate on the top-left HxW region, leave padding zero.
+# A fixed graph can only do these when the relevant size/factor is constant across the
+# task's examples (the official gate, incl. arc-gen, enforces that). Size-agnostic ops
+# (identity, transpose, color, upscale-by-factor) work regardless of grid size.
+
+def _rev_prefix(n, length):
+    """Indices that reverse the first n entries and leave [n:length) in place."""
+    return [n - 1 - i for i in range(n)] + list(range(n, length))
 
 
-def m_flip_v():
-    """Vertical flip = single Slice reversing axis 2 (steps=-1). No intermediate."""
-    return mk(
-        [helper.make_node("Slice", ["input", "st", "en", "ax", "sp"], ["output"])],
-        [_int64([GH - 1], "st"), _int64([-GH - 1], "en"), _int64([2], "ax"), _int64([-1], "sp")],
-    )
+def m_flip_h(W):
+    """Horizontal flip of Wxsomething content: single Gather(axis=3), no intermediate."""
+    return m_gather1(_rev_prefix(W, GW), axis=3)
 
 
-def m_rot180():
-    """180deg = single Slice reversing both spatial axes (steps=-1). One node, no
-    intermediate; index tensors are tiny (8 params total) vs a 2-Gather form whose
-    intermediate [1,10,30,30] float32 tensor would cost ~48 KB of 'memory'."""
-    return mk(
-        [helper.make_node("Slice", ["input", "st", "en", "ax", "sp"], ["output"])],
-        [_int64([GH - 1, GW - 1], "st"), _int64([-GH - 1, -GW - 1], "en"),
-         _int64([2, 3], "ax"), _int64([-1, -1], "sp")],
-    )
+def m_flip_v(H):
+    """Vertical flip: single Gather(axis=2), no intermediate."""
+    return m_gather1(_rev_prefix(H, GH), axis=2)
+
+
+def m_rot180(H, W):
+    """180deg on HxW content = reverse first H rows then first W cols (2 Gathers)."""
+    return m_gather2(_rev_prefix(H, GH), _rev_prefix(W, GW))
+
+
+def m_upscale(ry, rx):
+    """Integer block upscale by (ry,rx): out[i,j]=in[i//ry, j//rx]. Size-AGNOSTIC
+    (depends only on the factor) — idx i//ry sends padding rows to padding."""
+    return m_gather2([i // ry for i in range(GH)], [j // rx for j in range(GW)])
+
+
+def m_tile(IH, IW, ry, rx):
+    """Tile an IHxIW block ry x rx times: out[i,j]=in[i%IH,j%IW] inside the tiled
+    region, 0 outside (indices past the region point at a known-zero padding line)."""
+    row = [(i % IH) if i < IH * ry else IH for i in range(GH)]
+    col = [(j % IW) if j < IW * rx else IW for j in range(GW)]
+    return m_gather2(row, col)
 
 
 def m_conv1x1(W, B):
@@ -123,46 +134,31 @@ def m_crop(dr, dc, ho, wo):
     )
 
 
-def m_tile(hi, wi, rH, rW):
-    oh_, ow = hi * rH, wi * rW
-    return mk(
-        [helper.make_node("Slice", ["input", "st", "en"], ["cr"]),
-         helper.make_node("Tile", ["cr", "rp"], ["tl"]),
-         helper.make_node("Pad", ["tl", "pa"], ["output"], mode="constant")],
-        [_int64([0, 0, 0, 0], "st"),
-         _int64([1, C, hi, wi], "en"),
-         _int64([1, 1, rH, rW], "rp"),
-         _int64([0, 0, 0, 0, 0, 0, GH - oh_, GW - ow], "pa")],
-    )
-
-
 def m_translate(hi, wi, dr, dc):
     ri = [(r - dr) % hi for r in range(hi)] + list(range(hi, GH))
     ci = [(c - dc) % wi for c in range(wi)] + list(range(wi, GW))
     return m_gather2(ri, ci)
 
 
-def m_rot90(hi=GH, wi=GW):
-    """90deg CCW on the full square canvas = flip_v(transpose).
+def m_rot90(H, W):
+    """90deg CCW on HxW content = Transpose then reverse the first W rows.
 
-    NOTE: a rotation mixes row/col, so it CANNOT be two independent Gathers
-    (that only yields flips). Composed as Transpose then row-reverse Gather.
-    Valid for the square 30x30 canvas; non-square content needs real harness
-    semantics (Unknown #3).
-    """
+    A rotation mixes row/col so it cannot be two independent Gathers (that yields
+    only flips); it is Transpose (size-agnostic) + a content-aware row flip. The
+    transposed content is WxH, so we reverse its first W rows."""
     return mk(
         [helper.make_node("Transpose", ["input"], ["t"], perm=[0, 1, 3, 2]),
          helper.make_node("Gather", ["t", "ri"], ["output"], axis=2)],
-        [_int64(list(range(GH - 1, -1, -1)), "ri")],
+        [_int64(_rev_prefix(W, GH), "ri")],
     )
 
 
-def m_rot270(hi=GH, wi=GW):
-    """90deg CW on the full square canvas = flip_h(transpose)."""
+def m_rot270(H, W):
+    """90deg CW on HxW content = Transpose then reverse the first H columns."""
     return mk(
         [helper.make_node("Transpose", ["input"], ["t"], perm=[0, 1, 3, 2]),
          helper.make_node("Gather", ["t", "ci"], ["output"], axis=3)],
-        [_int64(list(range(GW - 1, -1, -1)), "ci")],
+        [_int64(_rev_prefix(H, GW), "ci")],
     )
 
 

@@ -56,7 +56,10 @@ def detect_conv1x1(ti, to):
     """General (possibly many-to-one) color map as a 1x1 conv weight matrix."""
     tc, oc = np.concatenate(ti), np.concatenate(to)
     W = np.zeros((C, C, 1, 1), np.float32)
-    B = np.full(C, -1.0, np.float32)
+    # bias in (-1, 0): correct channel -> 1 + bias > 0, others -> bias < 0, padding ->
+    # bias < 0. Critical: the official check is (output > 0) STRICT, so bias must NOT
+    # be -1 (that makes the correct channel exactly 0 -> fails as "no color").
+    B = np.full(C, -0.5, np.float32)
     for e in range(tc.shape[0]):
         for h in range(GH):
             for w in range(GW):
@@ -68,9 +71,10 @@ def detect_conv1x1(ti, to):
                     W[oc_, ic, 0, 0] = 1.0
     if np.count_nonzero(W) == 0:
         return None
+    # validate with the real semantics: (output > 0) must equal the one-hot expected
     for e in range(tc.shape[0]):
         p = np.einsum('oc,nchw->nohw', W[:, :, 0, 0], tc[e:e + 1]) + B[None, :, None, None]
-        if (np.argmax(p[0], axis=0) != np.argmax(oc[e], axis=0)).any():
+        if not np.array_equal((p[0] > 0.0).astype(np.float32), oc[e]):
             return None
     return W, B
 
@@ -164,132 +168,131 @@ def detect_factorized_gather(ti, to):
     return ri, ci
 
 
+# ---------------------------------------------------------------- content detectors
+def detect_upscale(pairs):
+    """Integer block upscale by a CONSTANT factor (size-agnostic builder)."""
+    facs = set()
+    for a, b in pairs:
+        if a.size == 0 or b.shape[0] % a.shape[0] or b.shape[1] % a.shape[1]:
+            return None
+        ry, rx = b.shape[0] // a.shape[0], b.shape[1] // a.shape[1]
+        if (ry, rx) == (1, 1) or not np.array_equal(np.repeat(np.repeat(a, ry, 0), rx, 1), b):
+            return None
+        facs.add((ry, rx))
+    return next(iter(facs)) if len(facs) == 1 else None
+
+
+def detect_tile(pairs):
+    """Tile of a CONSTANT-size block by a CONSTANT factor."""
+    in_shapes = {a.shape for a, _ in pairs}
+    if len(in_shapes) != 1:
+        return None
+    facs = set()
+    for a, b in pairs:
+        if b.shape[0] % a.shape[0] or b.shape[1] % a.shape[1]:
+            return None
+        ry, rx = b.shape[0] // a.shape[0], b.shape[1] // a.shape[1]
+        if (ry, rx) == (1, 1) or not np.array_equal(np.tile(a, (ry, rx)), b):
+            return None
+        facs.add((ry, rx))
+    if len(facs) != 1:
+        return None
+    (IH, IW), (ry, rx) = next(iter(in_shapes)), next(iter(facs))
+    return (IH, IW, ry, rx) if IH * ry <= GH and IW * rx <= GW else None
+
+
 # ---------------------------------------------------------------- main cascade
 def solve_task(train):
-    """train: list of {"input": grid, "output": grid} (python lists of ints).
+    """train: list of {"input": grid, "output": grid} (lists of ints 0-9).
 
-    Returns (model, method_name) or (None, None) if no template matched.
-    Grids larger than the 30x30 canvas are rejected (caller should fall back).
+    Detects the transformation on the CONTENT grids (actual HxW, not the 30x30
+    canvas) and emits a content-aware ONNX graph. Geometric ops that need a fixed
+    size are only attempted when that size is constant across examples; the official
+    gate (incl. arc-gen) is the final arbiter. Returns (model, method) or (None, None).
     """
-    ti, to, shapes = [], [], []
+    pairs, ti, to = [], [], []
     for eg in train:
-        ia = np.array(eg["input"], np.float32)
-        oa = np.array(eg["output"], np.float32)
-        hi, wi, ho, wo = ia.shape[0], ia.shape[1], oa.shape[0], oa.shape[1]
-        if max(hi, ho) > GH or max(wi, wo) > GW:
+        a = np.array(eg["input"]); b = np.array(eg["output"])
+        if max(a.shape + b.shape) > GH:
             return None, None
-        ti.append(one_hot(ia, hi, wi))
-        to.append(one_hot(oa, ho, wo))
-        shapes.append((hi, wi, ho, wo))
-    if not ti:
+        pairs.append((a, b))
+        ti.append(one_hot(a.astype(np.float32), *a.shape))
+        to.append(one_hot(b.astype(np.float32), *b.shape))
+    if not pairs:
         return None, None
 
-    same_inout = all(h == ho and w == wo for (h, w, ho, wo) in shapes)
-    same_size = len(set(shapes)) == 1
-    Hi = max(s[0] for s in shapes); Wi = max(s[1] for s in shapes)
-    Ho = max(s[2] for s in shapes); Wo = max(s[3] for s in shapes)
+    same_shape = all(a.shape == b.shape for a, b in pairs)
+    in_shapes = {a.shape for a, _ in pairs}
+    one_size = len(in_shapes) == 1
+    H, W = next(iter(in_shapes)) if one_size else (None, None)
 
     def try_(model, name):
         return (model, name) if runs_correct(model, ti, to) else (None, None)
 
-    # 0. Identity
-    if all((a == b).all() for a, b in zip(ti, to)):
+    def all_(fn):
+        return all(fn(a, b) for a, b in pairs)
+
+    # 0. Identity (size-agnostic)
+    if all_(lambda a, b: np.array_equal(a, b)):
         return ops.m_identity(), "identity"
 
-    # 1. Transpose
-    if same_inout and all(h == wo and w == ho for (h, w, ho, wo) in shapes):
+    # 1. Transpose (size-agnostic on the canvas)
+    if all_(lambda a, b: a.shape[::-1] == b.shape and np.array_equal(a.T, b)):
         m, n = try_(ops.m_transpose(), "transpose")
         if m: return m, n
 
-    # 2. Color permutation (Gather axis=1) — cheapest color op
+    # 2. Color permutation (Gather axis=1) then general 1x1 Conv color map
     idx = detect_color_permute(ti, to)
     if idx is not None:
         m, n = try_(ops.m_gather1(idx, axis=1), "color_permute")
         if m: return m, n
-
-    # 3. Conv1x1 color mapping (general map)
-    if same_inout and same_size:
+    if same_shape:  # 1x1 conv is per-pixel -> size-agnostic, no one_size needed
         res = detect_conv1x1(ti, to)
         if res is not None:
             m, n = try_(ops.m_conv1x1(*res), "conv1x1")
             if m: return m, n
 
-    # 4. Constant output (expensive — only if >=2 outputs and all identical, else
-    #    a single example would just be memorized and fail the generalization gate)
-    outs = [to_labels(t) for t in to]
+    # 3. Upscale by constant factor (size-agnostic)
+    fac = detect_upscale(pairs)
+    if fac is not None:
+        m, n = try_(ops.m_upscale(*fac), "upscale")
+        if m: return m, n
+
+    # 4. Flips / rot180 (need a constant content size)
+    if same_shape and one_size:
+        if all_(lambda a, b: np.array_equal(a[:, ::-1], b)):
+            m, n = try_(ops.m_flip_h(W), "flip_h")
+            if m: return m, n
+        if all_(lambda a, b: np.array_equal(a[::-1, :], b)):
+            m, n = try_(ops.m_flip_v(H), "flip_v")
+            if m: return m, n
+        if all_(lambda a, b: np.array_equal(np.rot90(a, 2), b)):
+            m, n = try_(ops.m_rot180(H, W), "rot180")
+            if m: return m, n
+
+    # 5. Rot90 / Rot270 (need a constant content size)
+    if one_size:
+        if all_(lambda a, b: np.array_equal(np.rot90(a, 1), b)):
+            m, n = try_(ops.m_rot90(H, W), "rot90")
+            if m: return m, n
+        if all_(lambda a, b: np.array_equal(np.rot90(a, 3), b)):
+            m, n = try_(ops.m_rot270(H, W), "rot270")
+            if m: return m, n
+
+    # 6. Tile (constant block + factor)
+    til = detect_tile(pairs)
+    if til is not None:
+        m, n = try_(ops.m_tile(*til), "tile")
+        if m: return m, n
+
+    # 7. Constant output (>=2 identical outputs; expensive dense tensor)
+    outs = [b for _, b in pairs]
     if len(outs) >= 2 and all(np.array_equal(outs[0], o) for o in outs[1:]):
         m, n = try_(ops.m_const(outs[0], *outs[0].shape), "const")
         if m: return m, n
 
-    # 5. Flip H / Flip V / Rot180 (single-node builders -> no intermediate tensor)
-    if all(np.array_equal(to_labels(t)[:, ::-1], to_labels(o)) for t, o in zip(ti, to)):
-        m, n = try_(ops.m_flip_h(), "flip_h")
-        if m: return m, n
-    if all(np.array_equal(to_labels(t)[::-1, :], to_labels(o)) for t, o in zip(ti, to)):
-        m, n = try_(ops.m_flip_v(), "flip_v")
-        if m: return m, n
-    if all(np.array_equal(np.rot90(to_labels(t), 2), to_labels(o)) for t, o in zip(ti, to)):
-        m, n = try_(ops.m_rot180(), "rot180")
-        if m: return m, n
-
-    # 6. Rot90 / Rot270
-    if same_inout and same_size and Hi == Wo and Wi == Ho:
-        for ang, maker, name in [(1, ops.m_rot90, "rot90"), (3, ops.m_rot270, "rot270")]:
-            if all(np.array_equal(np.rot90(to_labels(t), ang), to_labels(o))
-                   for t, o in zip(ti, to)):
-                m, n = try_(maker(Hi, Wi), name)
-                if m: return m, n
-
-    # 7. Row permute
-    p = detect_row_permute(ti, to)
-    if p is not None:
-        m, n = try_(ops.m_gather1(p, axis=2), "row_permute")
-        if m: return m, n
-
-    # 8. Column permute
-    p = detect_col_permute(ti, to)
-    if p is not None:
-        m, n = try_(ops.m_gather1(p, axis=3), "col_permute")
-        if m: return m, n
-
-    # 9. Crop (centered)
-    if same_inout is False and same_size:
-        hi, wi, ho, wo = shapes[0]
-        if ho < hi or wo < wi:
-            dr, dc = (hi - ho) // 2, (wi - wo) // 2
-            if all(np.array_equal(to_labels(o), to_labels(t)[dr:dr + ho, dc:dc + wo])
-                   for t, o in zip(ti, to)):
-                m, n = try_(ops.m_crop(dr, dc, ho, wo), "crop")
-                if m: return m, n
-
-    # 10. Translation (roll)
-    if same_inout and same_size and Hi <= 10 and Wi <= 10:
-        res = detect_translation(ti, to)
-        if res and (res[0] or res[1]):
-            m, n = try_(ops.m_translate(Hi, Wi, *res), "translate")
-            if m: return m, n
-
-    # 11. Tile
-    ish = set(to_labels(t).shape for t in ti)
-    if len(ish) == 1:
-        IH, IW = next(iter(ish))
-        ratios = set()
-        for t, o in zip(ti, to):
-            OHH, OWW = to_labels(o).shape
-            if OHH % IH == 0 and OWW % IW == 0:
-                rH, rW = OHH // IH, OWW // IW
-                if not (rH == 1 and rW == 1):
-                    ratios.add((rH, rW))
-        if len(ratios) == 1:
-            rH, rW = next(iter(ratios))
-            if IH * rH <= GH and IW * rW <= GW and all(
-                    np.array_equal(np.tile(to_labels(t)[:IH, :IW], (rH, rW)), to_labels(o))
-                    for t, o in zip(ti, to)):
-                m, n = try_(ops.m_tile(IH, IW, rH, rW), "tile")
-                if m: return m, n
-
-    # 12. Factorized gather (catch-all geometric)
-    if same_size:
+    # 8. Factorized row/col gather (catch-all geometric, needs constant size)
+    if one_size and same_shape:
         res = detect_factorized_gather(ti, to)
         if res is not None:
             m, n = try_(ops.m_gather2(*res), "factorized_gather")
