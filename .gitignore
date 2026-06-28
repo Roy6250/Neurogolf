@@ -1,0 +1,18 @@
+# Dataset
+Dataset/
+dataset/
+
+# Python Virtual Environment
+.venv/
+venv/
+env/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Models and Generated Files
+models/
+submission.zip
+trace_*.json
