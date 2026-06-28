@@ -1,0 +1,10 @@
+.venv/
+data/
+models/
+submission.zip
+__pycache__/
+*.pyc
+*.onnx
+*.json.zip
+# never commit the Kaggle token
+kaggle.json
