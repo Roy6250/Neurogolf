@@ -5,6 +5,9 @@ submission.zip
 __pycache__/
 *.pyc
 *.onnx
-*.json.zip
+*.log
+# Dataset/*.json is intentionally tracked (the competition tasks)
 # never commit the Kaggle token
 kaggle.json
+solver/tmp*.json
+onnxruntime_profile_*.json

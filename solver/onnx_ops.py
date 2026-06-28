@@ -59,6 +59,34 @@ def m_gather2(row_idx, col_idx):
     )
 
 
+def m_flip_h():
+    """Horizontal flip = single Slice reversing axis 3 (steps=-1). One node to
+    `output`, no intermediate, only ~4 tiny index params."""
+    return mk(
+        [helper.make_node("Slice", ["input", "st", "en", "ax", "sp"], ["output"])],
+        [_int64([GW - 1], "st"), _int64([-GW - 1], "en"), _int64([3], "ax"), _int64([-1], "sp")],
+    )
+
+
+def m_flip_v():
+    """Vertical flip = single Slice reversing axis 2 (steps=-1). No intermediate."""
+    return mk(
+        [helper.make_node("Slice", ["input", "st", "en", "ax", "sp"], ["output"])],
+        [_int64([GH - 1], "st"), _int64([-GH - 1], "en"), _int64([2], "ax"), _int64([-1], "sp")],
+    )
+
+
+def m_rot180():
+    """180deg = single Slice reversing both spatial axes (steps=-1). One node, no
+    intermediate; index tensors are tiny (8 params total) vs a 2-Gather form whose
+    intermediate [1,10,30,30] float32 tensor would cost ~48 KB of 'memory'."""
+    return mk(
+        [helper.make_node("Slice", ["input", "st", "en", "ax", "sp"], ["output"])],
+        [_int64([GH - 1, GW - 1], "st"), _int64([-GH - 1, -GW - 1], "en"),
+         _int64([2, 3], "ax"), _int64([-1, -1], "sp")],
+    )
+
+
 def m_conv1x1(W, B):
     """1x1 Conv color mapping. Use only when not a pure permutation (else Gather)."""
     return mk(

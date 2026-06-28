@@ -16,13 +16,17 @@ from onnx_ops import C, GH, GW, one_hot, to_labels
 
 # ---------------------------------------------------------------- verification
 def runs_correct(model, ti, to):
-    """Run the model on every example input; require argmax-equal outputs."""
+    """Real correctness check (matches neurogolf_utils.run_network / verify_subset):
+    threshold output at >0 and require it to EXACTLY equal the one-hot expected,
+    including all-zero padding cells. NOT argmax — argmax wrongly treats empty cells
+    as color 0 and would pass networks the official scorer fails.
+    """
     try:
         sess = ort.InferenceSession(model.SerializeToString(),
                                     providers=["CPUExecutionProvider"])
         for t, o in zip(ti, to):
-            p = sess.run(None, {"input": t})[0]
-            if (np.argmax(p[0], axis=0) != np.argmax(o[0], axis=0)).any():
+            p = (sess.run(["output"], {"input": t})[0] > 0.0).astype(float)
+            if not np.array_equal(p, o):
                 return False
         return True
     except Exception:
@@ -217,15 +221,15 @@ def solve_task(train):
         m, n = try_(ops.m_const(outs[0], *outs[0].shape), "const")
         if m: return m, n
 
-    # 5. Flip H / Flip V / Rot180
+    # 5. Flip H / Flip V / Rot180 (single-node builders -> no intermediate tensor)
     if all(np.array_equal(to_labels(t)[:, ::-1], to_labels(o)) for t, o in zip(ti, to)):
-        m, n = try_(ops.m_gather2(list(range(GH)), list(range(GW - 1, -1, -1))), "flip_h")
+        m, n = try_(ops.m_flip_h(), "flip_h")
         if m: return m, n
     if all(np.array_equal(to_labels(t)[::-1, :], to_labels(o)) for t, o in zip(ti, to)):
-        m, n = try_(ops.m_gather2(list(range(GH - 1, -1, -1)), list(range(GW))), "flip_v")
+        m, n = try_(ops.m_flip_v(), "flip_v")
         if m: return m, n
     if all(np.array_equal(np.rot90(to_labels(t), 2), to_labels(o)) for t, o in zip(ti, to)):
-        m, n = try_(ops.m_gather2(list(range(GH - 1, -1, -1)), list(range(GW - 1, -1, -1))), "rot180")
+        m, n = try_(ops.m_rot180(), "rot180")
         if m: return m, n
 
     # 6. Rot90 / Rot270
