@@ -216,8 +216,9 @@ def detect_symmetrize(pairs, axis):
     return next(iter(dims))  # the constant mirror-axis length
 
 
-def detect_const_freq(pairs, most):
-    """Output is a constant-size grid filled with the most/least frequent input color."""
+def detect_const_freq(pairs, most, exclude_bg=False):
+    """Output is a constant-size grid filled with the most/least frequent input color.
+    exclude_bg drops color 0 from the count (most-frequent non-background color)."""
     outs = [b for _, b in pairs]
     if len({o.shape for o in outs}) != 1:
         return None
@@ -225,6 +226,11 @@ def detect_const_freq(pairs, most):
         if len(set(b.ravel())) != 1:
             return None
         vals, cnts = np.unique(a, return_counts=True)
+        if exclude_bg:
+            keep = vals != 0
+            vals, cnts = vals[keep], cnts[keep]
+            if len(vals) == 0:
+                return None
         pick = vals[np.argmax(cnts)] if most else vals[np.argmin(cnts)]
         if b.ravel()[0] != pick:
             return None
@@ -323,11 +329,14 @@ def solve_task(train):
             m, n = try_(ops.m_symmetrize(hh, ww, axis), name)
             if m: return m, n
 
-    # 8. Constant output = most/least frequent color (histogram -> extreme channel)
-    for most, name in [(True, "const_most_freq"), (False, "const_least_freq")]:
-        res = detect_const_freq(pairs, most)
+    # 8. Constant output = most/least frequent color (histogram -> extreme channel),
+    #    including a background-excluded variant (most-frequent non-background color)
+    for most, exbg, name in [(True, False, "const_most_freq"),
+                             (False, False, "const_least_freq"),
+                             (True, True, "const_most_freq_nonbg")]:
+        res = detect_const_freq(pairs, most, exclude_bg=exbg)
         if res is not None:
-            m, n = try_(ops.m_const_freq(most, *res), name)
+            m, n = try_(ops.m_const_freq(most, *res, exclude_bg=exbg), name)
             if m: return m, n
 
     # 9. Constant output (>=2 identical outputs; expensive dense tensor)

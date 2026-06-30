@@ -149,24 +149,32 @@ def m_symmetrize(H, W, axis):
     )
 
 
-def m_const_freq(most, H, W):
+def m_const_freq(most, H, W, exclude_bg=False):
     """Constant output = grid filled with the most (or least) frequent color, over the
-    HxW content region. Program: per-color histogram via ReduceSum over space; pick the
-    extreme channel; broadcast it across the content region (keepmask)."""
+    HxW content region. Program: per-color histogram via ReduceSum over space; optionally
+    zero the background channel (color 0) so the pick is over non-background colors; take
+    the extreme channel; broadcast across the content region (keepmask)."""
     km = np.zeros((1, 1, GH, GW), np.float32)
     km[0, 0, :H, :W] = 1.0
-    pick_node = ("ReduceMax", "Sub", "Greater") if most else ("ReduceMin", "Add", "Less")
-    reduce_op, shift_op, cmp_op = pick_node
-    return mk(
-        [helper.make_node("ReduceSum", ["input"], ["hist"], axes=[2, 3], keepdims=1),  # [1,10,1,1]
-         helper.make_node(reduce_op, ["hist"], ["ext"], axes=[1], keepdims=1),         # [1,1,1,1]
-         helper.make_node(shift_op, ["ext", "half"], ["thr"]),                         # ext -/+ 0.5
-         helper.make_node(cmp_op, ["hist", "thr"], ["selb"]),                          # [1,10,1,1] bool
-         helper.make_node("Cast", ["selb"], ["sel"], to=TensorProto.FLOAT),
-         helper.make_node("Mul", ["sel", "km"], ["output"])],                          # broadcast -> [1,10,GH,GW]
-        [numpy_helper.from_array(km, "km"),
-         numpy_helper.from_array(np.array([0.5], np.float32), "half")],
-    )
+    reduce_op, shift_op, cmp_op = (("ReduceMax", "Sub", "Greater") if most
+                                   else ("ReduceMin", "Add", "Less"))
+    inits = [numpy_helper.from_array(km, "km"),
+             numpy_helper.from_array(np.array([0.5], np.float32), "half")]
+    nodes = [helper.make_node("ReduceSum", ["input"], ["hist0"], axes=[2, 3], keepdims=1)]
+    hist = "hist0"
+    if exclude_bg:  # zero the color-0 (background) count so it can't be the argmax
+        nonbg = np.ones((1, C, 1, 1), np.float32); nonbg[0, 0] = 0.0
+        inits.append(numpy_helper.from_array(nonbg, "nonbg"))
+        nodes.append(helper.make_node("Mul", ["hist0", "nonbg"], ["hist"]))
+        hist = "hist"
+    nodes += [
+        helper.make_node(reduce_op, [hist], ["ext"], axes=[1], keepdims=1),  # [1,1,1,1]
+        helper.make_node(shift_op, ["ext", "half"], ["thr"]),
+        helper.make_node(cmp_op, [hist, "thr"], ["selb"]),                   # [1,10,1,1] bool
+        helper.make_node("Cast", ["selb"], ["sel"], to=TensorProto.FLOAT),
+        helper.make_node("Mul", ["sel", "km"], ["output"]),                 # -> [1,10,GH,GW]
+    ]
+    return mk(nodes, inits)
 
 
 def m_translate(hi, wi, dr, dc):

@@ -49,6 +49,7 @@ def main(limit=400):
         task = json.loads(tf.read_text())
         model, method = solvers.solve_task(task.get("train", []))
 
+        frac = 0.0
         if model is not None:
             # golf, but keep only if it still passes the train examples
             try:
@@ -57,42 +58,42 @@ def main(limit=400):
                     model = opt
             except Exception:
                 pass
-            # official gate: train + test + arc-gen must all pass
+            # FRACTIONAL scoring: the board awards base x (held-out fraction correct),
+            # with no penalty for wrong. So we SHIP a train-passing net even if it misses
+            # some arc-gen examples — it banks base x frac >= 0, never worse than the
+            # placeholder. arc-gen is our held-out proxy; the figure is an estimate.
             ok, right, wrong = scorer.verify(model, task)
+            frac = right / (right + wrong) if (right + wrong) else 0.0
             if not ok:
-                method, model = f"FAILED_GATE({method})", None
+                method = f"{method}~{frac:.2f}"   # near-miss: shipped for partial credit
+            solved += int(ok)
 
         if model is None:
-            if method is None:
-                method = "unsolved"
-            model = ops.m_identity()  # valid placeholder, never leave a hole
-            solved_this = False
-        else:
-            solved_this = True
-            solved += 1
+            method = method or "unsolved"
+            model = ops.m_identity()   # valid placeholder; ~0 board on a non-identity task
 
         pts, mem, par = scorer.score(model)
-        # IMPORTANT: score_network does NOT check correctness. The leaderboard awards
-        # points only if the network is ALSO correct, so an unsolved placeholder scores
-        # 0 on the board even though its graph cost yields 25 in isolation.
-        board_pts = pts if solved_this else 0.0
+        # score_network ignores correctness; board points = base x held-out fraction.
+        board_pts = pts * frac
         total_points += board_pts
         onnx.save(model, str(OUT / f"task{i:03d}.onnx"))
-        rows.append((f"task{i:03d}", method, round(board_pts, 3), mem, par))
-        flag = "" if solved_this else "  (placeholder, board=0)"
-        print(f"  task{i:03d}  {method:24s} pts={board_pts:6.3f} mem={mem} par={par}{flag}", flush=True)
+        rows.append((f"task{i:03d}", method, round(board_pts, 3), round(frac, 3), mem, par))
+        print(f"  task{i:03d}  {method:26s} est={board_pts:6.2f} frac={frac:.2f} "
+              f"mem={mem} par={par}", flush=True)
 
     with open(REPO / "ledger.csv", "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["task", "method", "points", "memory", "params"])
+        w.writerow(["task", "method", "est_points", "frac", "memory", "params"])
         w.writerows(rows)
 
     with zipfile.ZipFile(REPO / "submission.zip", "w", zipfile.ZIP_DEFLATED) as zf:
         for p in sorted(OUT.glob("task*.onnx")):
             zf.write(p, arcname=p.name)
 
-    methods = Counter(r[1].split("(")[0] for r in rows)
-    print(f"\nSOLVED {solved}/{len(rows)}   TOTAL POINTS {total_points:.2f}")
+    near = sum(1 for r in rows if 0 < r[3] < 1.0)
+    methods = Counter(r[1].split("~")[0].split("(")[0] for r in rows)
+    print(f"\nFULLY SOLVED (frac=1) {solved}/{len(rows)}   NEAR-MISS (0<frac<1) {near}")
+    print(f"ESTIMATED TOTAL POINTS {total_points:.2f}  (board = base x held-out fraction)")
     print("methods:", dict(methods))
 
 

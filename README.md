@@ -35,10 +35,21 @@ See [`PLAN.md`](PLAN.md) for the full design, repo layout, milestones, and open 
 | `selftest.py` | synthetic validation of the cascade + surgery (no data needed) |
 | `run.py`      | end-to-end over the real 400 tasks → `submission.zip` + `ledger.csv` |
 
-### Current baseline (official scorer, gate = train+test+arc-gen)
-**14/400 solved, 255.41 points** — 2 color-permute, 2 conv1x1 color-map, 2 transpose,
-2 rot180, 2 upscale, 1 rot90, 2 symmetry-completion, 1 most-frequent-color. (Up from 4/95
-once the scorer/correctness were fixed; the last 3 are multi-op programs.)
+### Current baseline (official scorer)
+**14 fully solved (frac=1) + 2 near-miss, est. 271.6 points.** Fully solved: 2 color-permute,
+3 conv1x1 color-map, 2 transpose, 2 rot180, 2 upscale, 1 rot90, 2 symmetry-completion,
+1 most-frequent-color. (Up from 4/95 once the scorer/correctness were fixed.)
+
+Scoring is **fractional** (`base x held-out-fraction`, no penalty for wrong), so `run.py` ships
+a train-passing net even when it misses some arc-gen examples — it banks `base x frac >= 0`,
+never worse than the placeholder. arc-gen is our held-out proxy, so the total is an *estimate*;
+frac=1 tasks are solid, near-miss are proxy figures.
+
+`solver/primitives.py` holds two verified opset-11 building blocks for the object-reasoning tail
+(both pass 20/20 vs numpy): `compress_rows` (variable-output via triangular + permutation MatMul)
+and `cc_label` (connected components via unrolled neighbour-max). Note: a scan found **no clean
+fixed-graph `keep-largest-object` task** among the 400, so these are infrastructure for the
+arc-dsl transpiler path rather than immediate banking targets.
 
 ### Coverage ceiling & strategy
 `analyze.py` / `analyze2.py` show ARC tasks are extremely diverse: only ~17/400 are whole-grid
