@@ -201,6 +201,36 @@ def detect_tile(pairs):
     return (IH, IW, ry, rx) if IH * ry <= GH and IW * rx <= GW else None
 
 
+def detect_symmetrize(pairs, axis):
+    """out = (input where non-background, else its mirror). bg=0. Only the MIRROR axis
+    must be constant (a vertical mirror is W-agnostic, a horizontal mirror H-agnostic)."""
+    if not all(a.shape == b.shape for a, b in pairs):
+        return None
+    dims = {a.shape[axis] for a, _ in pairs}  # axis 0 = rows (H), axis 1 = cols (W)
+    if len(dims) != 1:
+        return None
+    for a, b in pairs:
+        m = a[::-1, :] if axis == 0 else a[:, ::-1]
+        if not np.array_equal(np.where(a != 0, a, m), b):
+            return None
+    return next(iter(dims))  # the constant mirror-axis length
+
+
+def detect_const_freq(pairs, most):
+    """Output is a constant-size grid filled with the most/least frequent input color."""
+    outs = [b for _, b in pairs]
+    if len({o.shape for o in outs}) != 1:
+        return None
+    for a, b in pairs:
+        if len(set(b.ravel())) != 1:
+            return None
+        vals, cnts = np.unique(a, return_counts=True)
+        pick = vals[np.argmax(cnts)] if most else vals[np.argmin(cnts)]
+        if b.ravel()[0] != pick:
+            return None
+    return outs[0].shape  # (H, W)
+
+
 # ---------------------------------------------------------------- main cascade
 def solve_task(train):
     """train: list of {"input": grid, "output": grid} (lists of ints 0-9).
@@ -285,7 +315,22 @@ def solve_task(train):
         m, n = try_(ops.m_tile(*til), "tile")
         if m: return m, n
 
-    # 7. Constant output (>=2 identical outputs; expensive dense tensor)
+    # 7. Symmetry completion (fill background by mirror; mirror-axis must be constant)
+    for axis, name in [(0, "symmetrize_v"), (1, "symmetrize_h")]:
+        D = detect_symmetrize(pairs, axis)
+        if D is not None:
+            hh, ww = (D, GW) if axis == 0 else (GH, D)
+            m, n = try_(ops.m_symmetrize(hh, ww, axis), name)
+            if m: return m, n
+
+    # 8. Constant output = most/least frequent color (histogram -> extreme channel)
+    for most, name in [(True, "const_most_freq"), (False, "const_least_freq")]:
+        res = detect_const_freq(pairs, most)
+        if res is not None:
+            m, n = try_(ops.m_const_freq(most, *res), name)
+            if m: return m, n
+
+    # 9. Constant output (>=2 identical outputs; expensive dense tensor)
     outs = [b for _, b in pairs]
     if len(outs) >= 2 and all(np.array_equal(outs[0], o) for o in outs[1:]):
         m, n = try_(ops.m_const(outs[0], *outs[0].shape), "const")

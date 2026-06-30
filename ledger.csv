@@ -111,7 +111,7 @@ task109,unsolved,0.0,0,0
 task110,unsolved,0.0,0,0
 task111,unsolved,0.0,0,0
 task112,unsolved,0.0,0,0
-task113,unsolved,0.0,0,0
+task113,symmetrize_v,14.39,40500,32
 task114,unsolved,0.0,0,0
 task115,unsolved,0.0,0,0
 task116,unsolved,0.0,0,0
@@ -127,7 +127,7 @@ task125,unsolved,0.0,0,0
 task126,unsolved,0.0,0,0
 task127,unsolved,0.0,0,0
 task128,unsolved,0.0,0,0
-task129,unsolved,0.0,0,0
+task129,const_most_freq,18.093,98,901
 task130,unsolved,0.0,0,0
 task131,unsolved,0.0,0,0
 task132,unsolved,0.0,0,0
@@ -383,7 +383,7 @@ task381,unsolved,0.0,0,0
 task382,unsolved,0.0,0,0
 task383,unsolved,0.0,0,0
 task384,unsolved,0.0,0,0
-task385,unsolved,0.0,0,0
+task385,symmetrize_v,14.39,40500,32
 task386,unsolved,0.0,0,0
 task387,unsolved,0.0,0,0
 task388,unsolved,0.0,0,0

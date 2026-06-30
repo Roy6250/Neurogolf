@@ -36,16 +36,20 @@ See [`PLAN.md`](PLAN.md) for the full design, repo layout, milestones, and open 
 | `run.py`      | end-to-end over the real 400 tasks → `submission.zip` + `ledger.csv` |
 
 ### Current baseline (official scorer, gate = train+test+arc-gen)
-**11/400 solved, 208.53 points** — 2 color-permute, 2 conv1x1 color-map, 2 transpose,
-2 rot180, 2 upscale, 1 rot90. (Up from 4/95 once the scorer/correctness were fixed.)
+**14/400 solved, 255.41 points** — 2 color-permute, 2 conv1x1 color-map, 2 transpose,
+2 rot180, 2 upscale, 1 rot90, 2 symmetry-completion, 1 most-frequent-color. (Up from 4/95
+once the scorer/correctness were fixed; the last 3 are multi-op programs.)
 
-### Why only 11 — the coverage ceiling
-`analyze.py` shows **only 17/400 tasks are whole-grid transforms**; the other 383 need
-object-level reasoning / composition (the real ARC difficulty). Of those 17, the ones with
-**variable grid sizes** (flips, tile) or **variable factors** (some upscales) are unsolvable
-by a *fixed* graph — there are no dynamic ops (`NonZero`/`Loop` are banned) to discover the
-size at runtime. ~11 are size-agnostic or size-constant, hence solvable. **Real progress past
-this requires Tier-B DSL synthesis with unrolled neighborhood/object ops** (see `PLAN.md`).
+### Coverage ceiling & strategy
+`analyze.py` / `analyze2.py` show ARC tasks are extremely diverse: only ~17/400 are whole-grid
+transforms and the richer families (symmetry, const-color, bbox-crop, gravity, object-keep) add
+just 1–2 tasks each. Tasks with **variable sizes/factors** are unsolvable by a *fixed* graph
+(no dynamic ops — `NonZero`/`Loop` banned). So **hand-detecting families caps out around ~20
+tasks** for growing effort. The scalable path is **transpiling known reference solvers**
+(arc-dsl) into opset-10 ONNX using the compose-able primitives in `TECHNIQUES.md`
+(variable-output MatMul, connected-component max-propagation, fixed-K peel, canvas+keepmask),
+which reaches ~300 in published work. New families are added as multi-op programs in
+`solvers.py`/`onnx_ops.py`, each gate-verified before banking.
 
 ```bash
 python3.12 -m venv .venv && ./.venv/bin/pip install numpy onnx onnxruntime kaggle

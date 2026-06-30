@@ -134,6 +134,41 @@ def m_crop(dr, dc, ho, wo):
     )
 
 
+def m_symmetrize(H, W, axis):
+    """Symmetry completion: out = (input if non-background else its mirror).
+    bg = color 0 (channel 0). axis=0 mirrors rows (needs constant H), axis=1 cols.
+    Program: mirror=Gather(reverse); cond=(channel0>0.5); out=Where(cond, mirror, input)."""
+    gaxis, idx = (2, _rev_prefix(H, GH)) if axis == 0 else (3, _rev_prefix(W, GW))
+    return mk(
+        [helper.make_node("Gather", ["input", "ridx"], ["mir"], axis=gaxis),
+         helper.make_node("Gather", ["input", "c0"], ["ch0"], axis=1),   # [1,1,GH,GW]
+         helper.make_node("Greater", ["ch0", "half"], ["cond"]),
+         helper.make_node("Where", ["cond", "mir", "input"], ["output"])],
+        [_int64(idx, "ridx"), _int64([0], "c0"),
+         numpy_helper.from_array(np.array([0.5], np.float32), "half")],
+    )
+
+
+def m_const_freq(most, H, W):
+    """Constant output = grid filled with the most (or least) frequent color, over the
+    HxW content region. Program: per-color histogram via ReduceSum over space; pick the
+    extreme channel; broadcast it across the content region (keepmask)."""
+    km = np.zeros((1, 1, GH, GW), np.float32)
+    km[0, 0, :H, :W] = 1.0
+    pick_node = ("ReduceMax", "Sub", "Greater") if most else ("ReduceMin", "Add", "Less")
+    reduce_op, shift_op, cmp_op = pick_node
+    return mk(
+        [helper.make_node("ReduceSum", ["input"], ["hist"], axes=[2, 3], keepdims=1),  # [1,10,1,1]
+         helper.make_node(reduce_op, ["hist"], ["ext"], axes=[1], keepdims=1),         # [1,1,1,1]
+         helper.make_node(shift_op, ["ext", "half"], ["thr"]),                         # ext -/+ 0.5
+         helper.make_node(cmp_op, ["hist", "thr"], ["selb"]),                          # [1,10,1,1] bool
+         helper.make_node("Cast", ["selb"], ["sel"], to=TensorProto.FLOAT),
+         helper.make_node("Mul", ["sel", "km"], ["output"])],                          # broadcast -> [1,10,GH,GW]
+        [numpy_helper.from_array(km, "km"),
+         numpy_helper.from_array(np.array([0.5], np.float32), "half")],
+    )
+
+
 def m_translate(hi, wi, dr, dc):
     ri = [(r - dr) % hi for r in range(hi)] + list(range(hi, GH))
     ci = [(c - dc) % wi for c in range(wi)] + list(range(wi, GW))
