@@ -11,3 +11,4 @@ __pycache__/
 kaggle.json
 solver/tmp*.json
 onnxruntime_profile_*.json
+models_transpiled/

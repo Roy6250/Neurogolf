@@ -45,6 +45,23 @@ a train-passing net even when it misses some arc-gen examples — it banks `base
 never worse than the placeholder. arc-gen is our held-out proxy, so the total is an *estimate*;
 frac=1 tasks are solid, near-miss are proxy figures.
 
+### arc-dsl transpiler (the scalable path — prototype)
+`solver/arcdsl_map.py` maps NeuroGolf tasks to Michael Hodel's `arc-dsl` reference solvers by
+running each `solve_<hash>` on the task's train grids: **399/400 tasks have a reference solver**
+(the transpiler's ceiling). The primitive histogram (`arcdsl_matched.json`) shows the vocabulary
+is dominated by `objects`(213), `fill`(166), `ofcolor`(117), `paint`(111) and the functional
+combinators `mapply`/`compose`/`rbind`/`fork`/`lbind`/`apply`/`chain` — so a full transpiler must
+compile a *functional* language, not just grid ops.
+
+`solver/transpile.py` is a working prototype: it parses each solver's AST and, for linear chains
+of whitelisted scalar-arg primitives, emits ONNX by **splicing our existing builders**, verified
+by the official gate. It currently transpiles ~12 tasks (mirrors, rot, up/downscale, replace,
+switch); adding a primitive handler grows coverage automatically. The combinator- and
+object-heavy majority (needing `objects`=`cc_label`, `fill`/`paint`, vector/function args) is the
+next build. Requires a local clone of github.com/michaelhodel/arc-dsl (path set at top of both
+files). Note: transpiling a reference can hit "arc-quirk" tasks where the reference disagrees
+with the arc-gen generator (e.g. task380) — the fractional gate catches these.
+
 `solver/primitives.py` holds two verified opset-11 building blocks for the object-reasoning tail
 (both pass 20/20 vs numpy): `compress_rows` (variable-output via triangular + permutation MatMul)
 and `cc_label` (connected components via unrolled neighbour-max). Note: a scan found **no clean
